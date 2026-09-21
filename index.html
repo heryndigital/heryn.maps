@@ -70,7 +70,11 @@
   </div>
   <button id="btnNewMap" class="btn primary wide"><svg><use href="#i-plus"/></svg>Novo mapa</button>
   <ul id="mapList"></ul>
-  <p class="drawer-note">Os mapas ficam salvos neste navegador. Exporte em .json para guardar cópias ou levar para outro computador.</p>
+  <p class="drawer-note">Seus mapas ficam salvos na sua conta e aparecem em qualquer dispositivo. Exporte em .json para guardar cópias.</p>
+  <div class="acct">
+    <span id="acctEmail" class="acct-email"></span>
+    <button id="btnLogout" class="btn">Sair</button>
+  </div>
 </aside>
 <div id="scrim" hidden></div>
 
@@ -114,9 +118,30 @@
   </div>
 </div>
 
+<div id="auth" class="auth loading">
+  <div class="auth-card">
+    <div class="auth-brand"><img src="assets/logo.png" alt=""><span>MAPAS</span></div>
+    <p class="auth-load">Carregando…</p>
+    <form id="authForm" class="auth-form">
+      <p class="auth-sub">Entre para acessar seus mapas mentais.</p>
+      <label>E-mail<input id="authEmail" type="email" autocomplete="username" required></label>
+      <label>Senha<input id="authPass" type="password" autocomplete="current-password"></label>
+      <button class="btn primary wide" type="submit">Entrar</button>
+      <button id="btnSignUp" class="btn wide" type="button">Criar conta</button>
+      <button id="btnGoogle" class="btn wide" type="button">Continuar com Google</button>
+      <button id="btnReset" class="link" type="button">Esqueci minha senha</button>
+    </form>
+    <div class="auth-fatal">
+      <button id="btnFatalRetry" class="btn">Tentar de novo</button>
+      <button id="btnFatalOut" class="btn" hidden>Sair</button>
+    </div>
+    <p id="authMsg" role="alert"></p>
+  </div>
+</div>
+
 <div id="toast" role="status" aria-live="polite"></div>
 <input id="fileImport" type="file" accept=".json,application/json" hidden>
 
-<script src="app.js"></script>
+<script type="module" src="app.js"></script>
 </body>
 </html>

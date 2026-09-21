@@ -235,3 +235,33 @@ body.drawer-open #drawer { transform: none; }
   .dbtn { padding: 0 10px; }
   #drawer { width: min(320px, 88vw); }
 }
+
+/* ---------- conta e login ---------- */
+.acct { display: flex; align-items: center; gap: 8px; padding-top: 12px; border-top: 1px solid var(--border); }
+.acct-email { flex: 1; min-width: 0; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct .btn { height: 32px; padding: 0 12px; }
+
+.auth { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 16px; background: var(--bg); overflow: auto; }
+.auth[hidden] { display: none; }
+.auth-card { width: min(380px, 100%); display: flex; flex-direction: column; gap: 14px; padding: 28px 24px; background: var(--panel); border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--shadow); }
+.auth-brand { display: flex; align-items: center; gap: 10px; justify-content: center; }
+.auth-brand img { width: 40px; height: 40px; object-fit: contain; }
+.auth-brand span { font-weight: 900; font-stretch: 75%; letter-spacing: .1em; font-size: 26px; }
+.auth-sub { margin: 0 0 4px; text-align: center; color: var(--muted); }
+.auth-form { display: flex; flex-direction: column; gap: 12px; }
+.auth-form label { display: flex; flex-direction: column; gap: 6px; font-weight: 600; font-size: 13px; }
+.auth-form input {
+  height: 42px; padding: 0 12px; background: var(--surface); color: var(--text); border: 1px solid var(--border);
+  border-radius: 10px; font: 400 15px "Hubot Sans", sans-serif;
+}
+.auth-form input:focus { outline: none; border-color: var(--accent); }
+.link { background: none; border: 0; color: var(--muted); text-decoration: underline; padding: 4px; font-size: 13px; }
+.link:hover { color: var(--text); }
+#authMsg { margin: 0; min-height: 1.4em; text-align: center; color: var(--danger); font-size: 13px; line-height: 1.45; }
+#authMsg.ok { color: #4cc790; }
+.auth-load, .auth-fatal { display: none; margin: 0; text-align: center; color: var(--muted); }
+.auth.loading .auth-form, .auth.fatal .auth-form { display: none; }
+.auth.loading .auth-load { display: block; }
+.auth.fatal .auth-fatal { display: flex; gap: 8px; justify-content: center; }
+.auth.busy { cursor: progress; }
+.auth.busy .auth-form { opacity: .6; pointer-events: none; }
