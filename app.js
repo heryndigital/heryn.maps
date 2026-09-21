@@ -1,10 +1,12 @@
+import * as cloud from './cloud.js';
+
 (() => {
 'use strict';
 
 /* =====================================================================
    Heryn Mapas — editor de mapas mentais
-   Sem dependências. Os mapas ficam em localStorage (objeto Store); para
-   sincronizar na nuvem basta trocar o Store por uma versão Firestore.
+   Login e mapas ficam no Firebase (ver cloud.js). Nada é salvo no navegador,
+   exceto a preferência de tema claro/escuro.
    ===================================================================== */
 
 /* ---------- utilidades ---------- */
@@ -23,37 +25,6 @@ const STYLES = [
 const MAX_NODE_W = 260;
 const HGAP = 46, ROOT_GAP = 74, VGAP = 12;
 const MAX_NODES = 5000;
-
-/* ---------- armazenamento local ---------- */
-const Store = {
-  IDX: 'heryn-mapas:index',
-  LAST: 'heryn-mapas:last',
-  key: id => `heryn-mapas:map:${id}`,
-  index() {
-    try { return JSON.parse(localStorage.getItem(this.IDX)) || []; } catch { return []; }
-  },
-  load(id) {
-    try { return JSON.parse(localStorage.getItem(this.key(id))); } catch { return null; }
-  },
-  save(m) {
-    try {
-      localStorage.setItem(this.key(m.id), JSON.stringify(m));
-      const idx = this.index().filter(e => e.id !== m.id);
-      idx.push({ id: m.id, title: m.title, updated: m.updated });
-      idx.sort((a, b) => b.updated - a.updated);
-      localStorage.setItem(this.IDX, JSON.stringify(idx));
-      return true;
-    } catch { return false; }
-  },
-  remove(id) {
-    try {
-      localStorage.removeItem(this.key(id));
-      localStorage.setItem(this.IDX, JSON.stringify(this.index().filter(e => e.id !== id)));
-    } catch { /* ignora */ }
-  },
-  getLast() { try { return localStorage.getItem(this.LAST); } catch { return null; } },
-  setLast(id) { try { localStorage.setItem(this.LAST, id); } catch { /* ignora */ } },
-};
 
 /* ---------- modelo ---------- */
 const newNode = (text = '') => ({ id: uid(), text, children: [], collapsed: false, color: null, side: null });
@@ -114,6 +85,9 @@ let L = new Map();             // id -> layout
 let clip = null;               // ramo copiado
 const view = { x: 0, y: 0, k: 1 };
 let autoFit = true;            // reenquadra enquanto o usuário não mexeu na vista
+let mapIndex = [];              // lista de mapas da conta: { id, title, updated }
+let user = null, unwatch = null;
+let openToken = 0;
 const undoS = [], redoS = [];
 const els = new Map();
 
@@ -397,21 +371,39 @@ function afterHistory() {
 }
 
 let saveTimer = 0;
+let dirty = false, saving = 0;
+const setStatus = text => { $('#saveState').textContent = text; };
+
 function scheduleSave() {
-  $('#saveState').textContent = 'Salvando…';
+  dirty = true;
+  setStatus('Salvando…');
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(flushSave, 400);
+  saveTimer = setTimeout(flushSave, 1200);
 }
-function flushSave() {
-  if (!map) return;
+async function flushSave() {
   clearTimeout(saveTimer);
   saveTimer = 0;
+  if (!map || !dirty) return;
+  dirty = false;
   map.updated = Date.now();
-  const ok = Store.save(map);
-  $('#saveState').textContent = ok ? 'Salvo neste navegador' : 'Erro ao salvar';
-  if (!ok) toast('Não foi possível salvar: armazenamento do navegador cheio ou bloqueado.');
-  renderDrawer();
+  const snapshot = { id: map.id, title: map.title, updated: map.updated, root: map.root };
+  saving++;
+  try {
+    await cloud.saveMap(snapshot);
+    if (!dirty && saving === 1) setStatus('Salvo na nuvem');
+  } catch (err) {
+    dirty = true;
+    setStatus('Erro ao salvar');
+    toast('Não foi possível salvar na nuvem. Vamos tentar de novo.');
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(flushSave, 5000);
+  } finally {
+    saving--;
+  }
 }
+window.addEventListener('offline', () => { if (map) setStatus('Sem conexão. Envio pendente…'); });
+window.addEventListener('online', () => { if (map) { setStatus(dirty || saving ? 'Salvando…' : 'Salvo na nuvem'); flushSave(); } });
+window.addEventListener('beforeunload', e => { if (dirty || saving) { e.preventDefault(); e.returnValue = ''; } });
 
 function changed() {
   render();
@@ -674,15 +666,15 @@ function renderDrawer() {
   const ul = $('#mapList');
   ul.textContent = '';
   const fmt = new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
-  for (const e of Store.index()) {
+  for (const e of mapIndex) {
     const li = document.createElement('li');
     li.className = e.id === map?.id ? 'active' : '';
     li.innerHTML = '<button class="open"><b></b><small></small></button>' +
       '<button class="ico dup" title="Duplicar mapa" aria-label="Duplicar mapa"><svg><use href="#i-copy"/></svg></button>' +
       '<button class="ico del" title="Excluir mapa" aria-label="Excluir mapa"><svg><use href="#i-trash"/></svg></button>';
     $('b', li).textContent = e.title || 'Sem título';
-    $('small', li).textContent = fmt.format(e.updated);
-    $('.open', li).onclick = () => { openMap(e.id); setDrawer(false); };
+    $('small', li).textContent = e.updated ? fmt.format(e.updated) : '';
+    $('.open', li).onclick = () => { if (!map || e.id !== map.id) openMap(e.id); setDrawer(false); };
     $('.dup', li).onclick = () => duplicateMap(e.id);
     $('.del', li).onclick = () => deleteMap(e.id);
     ul.appendChild(li);
@@ -690,54 +682,74 @@ function renderDrawer() {
 }
 
 /* ---------- gestão de mapas ---------- */
-function openMap(id) {
-  finishEdit(true);
-  if (map) flushSave();
-  let m = Store.load(id);
-  try { if (m) m.root = normalizeTree(m.root); } catch { m = null; }
-  if (!m) { m = sampleMap(); Store.save(m); }
+const blankMap = () => ({ id: cloud.newId(), title: 'Novo mapa', updated: Date.now(), root: newNode('Tema central') });
+
+function activate(m) {
   map = m;
   undoS.length = 0; redoS.length = 0;
   selId = map.root.id;
   $('#title').value = map.title;
-  Store.setLast(map.id);
+  try { history.replaceState(null, '', `#${map.id}`); } catch { /* ignora */ }
   render();
   fit(false);
   renderDrawer();
-  $('#saveState').textContent = 'Salvo neste navegador';
 }
 
-function createMap() {
-  flushSave();
-  const m = { id: uid(), title: 'Novo mapa', updated: Date.now(), root: newNode('Tema central') };
-  Store.save(m);
-  openMap(m.id);
+// Salva o mapa atual antes de trocar; devolve false se não deu para salvar.
+async function settle() {
+  finishEdit(true);
+  await flushSave();
+  if (dirty) { toast('Ainda salvando o mapa atual. Tente de novo em instantes.'); return false; }
+  return true;
+}
+
+async function openMap(id) {
+  if (!(await settle())) return false;
+  const token = ++openToken;
+  setStatus('Carregando…');
+  let m = null;
+  try {
+    m = await cloud.loadMap(id);
+    if (m) m.root = normalizeTree(m.root);
+  } catch { m = null; }
+  if (token !== openToken) return false;
+  if (!m) { setStatus(map ? 'Salvo na nuvem' : ''); toast('Não foi possível abrir esse mapa.'); return false; }
+  activate(m);
+  setStatus('Salvo na nuvem');
+  return true;
+}
+
+async function createMap() {
+  if (!(await settle())) return;
+  ++openToken;
+  activate(blankMap());
+  scheduleSave();
   setDrawer(false);
-  startEdit(m.root.id);
+  startEdit(map.root.id);
 }
 
-function duplicateMap(id) {
-  if (map && id === map.id) flushSave();
-  const src = Store.load(id);
-  if (!src) return;
-  const m = { ...src, id: uid(), title: `${src.title} (cópia)`, updated: Date.now() };
-  Store.save(m);
-  renderDrawer();
-  toast('Mapa duplicado');
+async function duplicateMap(id) {
+  if (map && id === map.id && !(await settle())) return;
+  try {
+    const src = await cloud.loadMap(id);
+    if (!src) throw new Error('vazio');
+    await cloud.saveMap({ ...src, id: cloud.newId(), title: `${src.title} (cópia)`.slice(0, 200), updated: Date.now() });
+    toast('Mapa duplicado');
+  } catch { toast('Não foi possível duplicar o mapa.'); }
 }
 
-function deleteMap(id) {
-  const e = Store.index().find(x => x.id === id);
+async function deleteMap(id) {
+  const e = mapIndex.find(x => x.id === id);
   if (!confirm(`Excluir o mapa "${e ? e.title : ''}"? Esta ação não pode ser desfeita.`)) return;
   const current = map && id === map.id;
-  if (current) { clearTimeout(saveTimer); saveTimer = 0; }
-  Store.remove(id);
+  if (current) { clearTimeout(saveTimer); saveTimer = 0; dirty = false; }
+  try { await cloud.removeMap(id); } catch { toast('Não foi possível excluir o mapa.'); return; }
   if (current) {
     map = null;
-    const next = Store.index()[0];
-    openMap(next ? next.id : '');
+    ++openToken;
+    const next = mapIndex.find(x => x.id !== id);
+    if (!(next && await openMap(next.id))) { activate(blankMap()); scheduleSave(); }
   }
-  renderDrawer();
 }
 
 /* ---------- exportar / importar ---------- */
@@ -847,16 +859,16 @@ function exportPNG() {
 
 function importFile(file) {
   const reader = new FileReader();
-  reader.onload = () => {
+  reader.onload = async () => {
     try {
       if (String(reader.result).length > 8e6) throw new Error('Arquivo grande demais.');
       const data = JSON.parse(reader.result);
       const root = normalizeTree(data.root || data);
       const title = String(data.title || root.text || 'Mapa importado').slice(0, 80);
-      flushSave();
-      const m = { id: uid(), title, updated: Date.now(), root };
-      if (!Store.save(m)) throw new Error('Armazenamento cheio.');
-      openMap(m.id);
+      if (!(await settle())) return;
+      ++openToken;
+      activate({ id: cloud.newId(), title, updated: Date.now(), root });
+      scheduleSave();
       toast('Mapa importado');
     } catch (err) {
       toast(`Falha ao importar: ${err.message}`);
@@ -1084,7 +1096,7 @@ window.addEventListener('keydown', e => {
       case 'c': e.preventDefault(); copyNode(false); break;
       case 'x': e.preventDefault(); copyNode(true); break;
       case 'v': e.preventDefault(); pasteNode(); break;
-      case 's': e.preventDefault(); flushSave(); toast('Mapa salvo'); break;
+      case 's': e.preventDefault(); flushSave().then(() => { if (!dirty) toast('Mapa salvo na nuvem'); }); break;
       case '0': e.preventDefault(); fit(true); break;
       case '=': case '+': e.preventDefault(); animate(); zoomAt(stage.clientWidth / 2, stage.clientHeight / 2, view.k * 1.2); break;
       case '-': e.preventDefault(); animate(); zoomAt(stage.clientWidth / 2, stage.clientHeight / 2, view.k / 1.2); break;
@@ -1107,6 +1119,141 @@ window.addEventListener('pagehide', () => { finishEdit(true); flushSave(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden && map) flushSave(); });
 new ResizeObserver(() => { if (!map) return; if (autoFit) fit(false); else applyView(); }).observe(stage);
 
+/* ---------- login ---------- */
+const authEl = $('#auth');
+const authMsg = $('#authMsg');
+function setAuthMsg(text, ok = false) {
+  authMsg.textContent = text;
+  authMsg.classList.toggle('ok', ok);
+}
+function showAuth(text = '') {
+  authEl.classList.remove('loading', 'fatal');
+  authEl.hidden = false;
+  setAuthMsg(text);
+}
+function showFatal(text, canLogout) {
+  authEl.classList.remove('loading');
+  authEl.classList.add('fatal');
+  authEl.hidden = false;
+  $('#btnFatalOut').hidden = !canLogout;
+  setAuthMsg(text);
+}
+const hideAuth = () => { authEl.hidden = true; };
+
+async function authAction(fn) {
+  setAuthMsg('');
+  authEl.classList.add('busy');
+  try { await fn(); } catch (err) { setAuthMsg(cloud.errorMessage(err)); } finally { authEl.classList.remove('busy'); }
+}
+const credentials = () => ({ email: $('#authEmail').value.trim(), pass: $('#authPass').value });
+
+$('#authForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const { email, pass } = credentials();
+  authAction(() => cloud.signIn(email, pass));
+});
+$('#btnSignUp').onclick = () => {
+  const { email, pass } = credentials();
+  if (!email || !pass) { setAuthMsg('Preencha e-mail e senha para criar a conta.'); return; }
+  authAction(() => cloud.signUp(email, pass));
+};
+$('#btnGoogle').onclick = () => authAction(() => cloud.signInGoogle());
+$('#btnReset').onclick = () => {
+  const { email } = credentials();
+  if (!email) { setAuthMsg('Digite seu e-mail e clique de novo em "Esqueci minha senha".'); return; }
+  authAction(async () => {
+    await cloud.resetPassword(email);
+    setAuthMsg('Enviamos um e-mail para redefinir a senha. Veja também o spam.', true);
+  });
+};
+$('#btnFatalRetry').onclick = () => location.reload();
+
+async function signOutFlow() {
+  finishEdit(true);
+  await flushSave();
+  if (dirty && !confirm('Há alterações que ainda não foram salvas na nuvem. Sair mesmo assim?')) return;
+  dirty = false;
+  cloud.logout();
+}
+$('#btnLogout').onclick = signOutFlow;
+$('#btnFatalOut').onclick = signOutFlow;
+
+/* ---------- sessão ---------- */
+function endSession() {
+  if (unwatch) { unwatch(); unwatch = null; }
+  clearTimeout(saveTimer);
+  saveTimer = 0; dirty = false; saving = 0;
+  user = null; map = null; mapIndex = [];
+  ++openToken;
+  elNodes.textContent = '';
+  elLinks.innerHTML = '';
+  els.clear(); L = new Map();
+  setDrawer(false);
+  $('#authPass').value = '';
+  showAuth();
+}
+
+// Traz para a conta os mapas que ficaram salvos neste navegador nas versões antigas.
+async function migrateLocal() {
+  const IDX = 'heryn-mapas:index';
+  let idx = [];
+  try { idx = JSON.parse(localStorage.getItem(IDX)) || []; } catch { return; }
+  if (!idx.length) return;
+  if (!confirm(`Encontramos ${idx.length} mapa(s) salvo(s) só neste navegador. Enviar para a sua conta?\n\nSe cancelar, eles continuam aqui e perguntamos de novo no próximo login.`)) return;
+  const left = [];
+  let sent = 0;
+  for (const e of idx) {
+    try {
+      const m = JSON.parse(localStorage.getItem(`heryn-mapas:map:${e.id}`));
+      await cloud.saveMap({ id: cloud.newId(), title: String(m.title || 'Sem título').slice(0, 200), updated: Number(m.updated) || Date.now(), root: normalizeTree(m.root) });
+      localStorage.removeItem(`heryn-mapas:map:${e.id}`);
+      sent++;
+    } catch { left.push(e); }
+  }
+  try {
+    if (left.length) localStorage.setItem(IDX, JSON.stringify(left)); else { localStorage.removeItem(IDX); localStorage.removeItem('heryn-mapas:last'); }
+  } catch { /* ignora */ }
+  toast(`${sent} mapa(s) enviado(s) para a nuvem`);
+}
+
+async function startSession(u) {
+  user = u;
+  $('#acctEmail').textContent = u.email || '';
+  setStatus('Carregando…');
+  let failure = null, firstDone = false, timer = 0, release;
+  const first = new Promise(r => { release = r; });
+  unwatch = cloud.watchMaps((list, fromCache) => {
+    mapIndex = list;
+    renderDrawer();
+    if (firstDone) return;
+    // Cache vazio logo ao abrir pode ser só falta de rede: espera a resposta do servidor.
+    if (fromCache && !list.length) { if (!timer) timer = setTimeout(() => { firstDone = true; release(); }, 8000); return; }
+    firstDone = true; clearTimeout(timer); release();
+  }, err => {
+    failure = err;
+    if (!firstDone) { firstDone = true; clearTimeout(timer); release(); }
+    else toast('Perdemos a conexão com seus mapas. Recarregue a página se persistir.');
+  });
+  await first;
+  if (user !== u) return;
+  if (failure) {
+    showFatal(failure.code === 'permission-denied'
+      ? 'O Firebase recusou o acesso aos seus mapas. As regras do Firestore precisam ser publicadas (arquivo firestore.rules).'
+      : `Não foi possível carregar seus mapas (${failure.code || 'erro'}).`, true);
+    return;
+  }
+  await migrateLocal();
+  if (user !== u) return;
+  const wanted = decodeURIComponent(location.hash.slice(1));
+  const target = mapIndex.find(e => e.id === wanted) || mapIndex[0];
+  if (target) {
+    if (!(await openMap(target.id))) showFatal('Não foi possível abrir seus mapas. Verifique a conexão e tente de novo.', true);
+  } else {
+    activate(sampleMap());
+    scheduleSave();
+  }
+}
+
 /* ---------- início ---------- */
 async function init() {
   let theme = 'dark';
@@ -1119,12 +1266,16 @@ async function init() {
       document.fonts.load(`500 14px ${FONT_FAMILY}`),
     ]);
   } catch { /* segue com a fonte de reserva */ }
-  const idx = Store.index();
-  const last = Store.getLast();
-  const first = idx.find(e => e.id === last) || idx[0];
-  if (first) openMap(first.id);
-  else { const m = sampleMap(); Store.save(m); openMap(m.id); }
+  if (!cloud.configured) {
+    showFatal('O Firebase ainda não foi configurado. Cole o firebaseConfig em public/firebase-config.js.', false);
+    return;
+  }
+  cloud.onUser(u => {
+    if (!u) { endSession(); return; }
+    if (user && user.uid === u.uid) return;
+    hideAuth();
+    startSession(u);
+  });
 }
 init();
-
 })();
